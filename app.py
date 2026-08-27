@@ -146,6 +146,28 @@ def shortest_angle_diff(current_deg, baseline_deg):
     return abs(diff)
 
 
+def draw_text_with_bg(frame, text, org, font, scale, color, thickness, bg_color=(0, 0, 0), bg_alpha=0.5):
+    """Draw text on the frame with a semi-transparent black rectangle behind it for readability.
+
+    A translucent cv2.rectangle is blended (alpha ~0.5) underneath the text so the labels
+    stay readable on any background. The geometry is computed from cv2.getTextSize and
+    clipped to the frame bounds.
+    """
+    h, w = frame.shape[:2]
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+    x, y = org
+    # Expand the box slightly around the text and clip to the frame bounds
+    p1 = (max(0, x - 5), max(0, y - th - 6))
+    p2 = (min(w - 1, x + tw + 5), min(h - 1, y + baseline + 2))
+    # Semi-transparent overlay (alpha blend)
+    overlay = frame.copy()
+    cv2.rectangle(overlay, p1, p2, bg_color, -1)
+    cv2.addWeighted(overlay, bg_alpha, frame, 1 - bg_alpha, 0, dst=frame)
+    # Draw the text on top of the translucent box
+    cv2.putText(frame, text, (x, y), font, scale, color, thickness)
+    return frame
+
+
 def draw_guides(frame, pts, metrics):
     """Draw vertical line from nose to shoulder midpoint and horizontal shoulder line for visualization.
     pts: pixel coords dict from landmarks_to_dict.
@@ -206,11 +228,11 @@ with st.sidebar:
     calibrate_btn = st.button('Calibrate')
 
     st.markdown('---')
-    st.subheader('Alert Thresholds')
-    # New slider labels as requested
-    forward_thresh = st.slider('Forward Lean (Turtle Neck) Threshold (increase in face/shoulder ratio)', min_value=0.0, max_value=0.5, value=0.05, step=0.01, key='forward_thresh')
-    lateral_thresh = st.slider('Lateral Tilt (Body Lean) Threshold (deg)', min_value=0.0, max_value=45.0, value=10.0, step=0.5, key='lateral_thresh')
-    shoulder_thresh_new = st.slider('Shoulder Imbalance Threshold (deg)', min_value=0.0, max_value=45.0, value=10.0, step=0.5, key='shoulder_thresh')
+    # Threshold sliders grouped inside an expander for a cleaner sidebar
+    with st.expander('Cài đặt Ngưỡng', expanded=True):
+        forward_thresh = st.slider('Forward Lean (Turtle Neck) Threshold (increase in face/shoulder ratio)', min_value=0.0, max_value=0.5, value=0.05, step=0.01, key='forward_thresh')
+        lateral_thresh = st.slider('Lateral Tilt (Body Lean) Threshold (deg)', min_value=0.0, max_value=45.0, value=10.0, step=0.5, key='lateral_thresh')
+        shoulder_thresh_new = st.slider('Shoulder Imbalance Threshold (deg)', min_value=0.0, max_value=45.0, value=10.0, step=0.5, key='shoulder_thresh')
 
     st.markdown('---')
     st.write('Debounce frames (consecutive frames before alert):')
@@ -225,8 +247,11 @@ with col2:
     score_text = st.empty()
     warning_text = st.empty()
     st.markdown('---')
-    st.write('Baseline (calibration):')
-    st.write(st.session_state.baseline)
+    # Live metric cards with current value + delta vs baseline
+    # (replaces the raw JSON baseline display)
+    m_forward = st.empty()
+    m_lateral = st.empty()
+    m_shoulder = st.empty()
     st.markdown('---')
     if st.session_state.alert_active:
         st.error('ALERT: PERSISTENT BAD POSTURE!')
@@ -345,18 +370,19 @@ if st.session_state.camera_on:
             # Draw vertical nose->shoulder_mid and shoulder line
             frame_drawn = draw_guides(frame_drawn, pts, metrics)
 
-            # Overlay textual info (metrics and warning)
+            # Overlay textual info (metrics and warning) with a semi-transparent background
             y0 = 30
             dy = 25
+            font = cv2.FONT_HERSHEY_SIMPLEX
             if metrics is not None:
-                cv2.putText(frame_drawn, f"Forward Ratio: {metrics['forward_lean']:.3f}", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
-                cv2.putText(frame_drawn, f"Lateral Tilt: {metrics['lateral_tilt']:.1f} deg", (10, y0+dy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
-                cv2.putText(frame_drawn, f"Shoulder Angle: {metrics['shoulder_imbalance']:.1f} deg", (10, y0+2*dy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+                draw_text_with_bg(frame_drawn, f"Forward Ratio: {metrics['forward_lean']:.3f}", (10, y0), font, 0.7, (0,255,255), 2)
+                draw_text_with_bg(frame_drawn, f"Lateral Tilt: {metrics['lateral_tilt']:.1f} deg", (10, y0+dy), font, 0.7, (0,255,255), 2)
+                draw_text_with_bg(frame_drawn, f"Shoulder Angle: {metrics['shoulder_imbalance']:.1f} deg", (10, y0+2*dy), font, 0.7, (0,255,255), 2)
             else:
-                cv2.putText(frame_drawn, 'No pose detected', (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+                draw_text_with_bg(frame_drawn, 'No pose detected', (10, y0), font, 0.7, (0,0,255), 2)
 
             if st.session_state.alert_active:
-                cv2.putText(frame_drawn, 'BAD POSTURE!', (int(image_w/4), int(image_h/2)), cv2.FONT_HERSHEY_DUPLEX, 2.0, (0,0,255), 4)
+                draw_text_with_bg(frame_drawn, 'BAD POSTURE!', (int(image_w/4), int(image_h/2)), cv2.FONT_HERSHEY_DUPLEX, 2.0, (0,0,255), 4)
 
             # Compute a simple score 0-100 (higher = better) using thresholds
             score = 100
@@ -376,6 +402,21 @@ if st.session_state.camera_on:
                 score = int((s1 + s2 + s3) / 3.0)
 
             score_text.metric(label='Posture Score (0-100)', value=score)
+
+            # Live metric cards with current value + delta vs baseline
+            if metrics is not None and st.session_state.baseline['forward_lean'] is not None:
+                m_forward.metric(label='Forward Ratio', value=f"{metrics['forward_lean']:.3f}", delta=f"{deviations['forward_lean']:+.3f}")
+                m_lateral.metric(label='Lateral Tilt (deg)', value=f"{metrics['lateral_tilt']:.1f}", delta=f"{deviations['lateral_tilt']:+.1f}")
+                m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{metrics['shoulder_imbalance']:.1f}", delta=f"{deviations['shoulder_imbalance']:+.1f}")
+            elif metrics is not None:
+                # metrics available but no baseline yet
+                m_forward.metric(label='Forward Ratio', value=f"{metrics['forward_lean']:.3f}", delta="n/a")
+                m_lateral.metric(label='Lateral Tilt (deg)', value=f"{metrics['lateral_tilt']:.1f}", delta="n/a")
+                m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{metrics['shoulder_imbalance']:.1f}", delta="n/a")
+            else:
+                m_forward.metric(label='Forward Ratio', value="--")
+                m_lateral.metric(label='Lateral Tilt (deg)', value="--")
+                m_shoulder.metric(label='Shoulder Imbalance (deg)', value="--")
 
             # Warning text
             if st.session_state.alert_active:
@@ -401,6 +442,9 @@ else:
     release_resources()
     frame_placeholder.image(np.zeros((480, 640, 3), dtype=np.uint8))
     score_text.write('Camera is off. Turn on the camera to start monitoring.')
+    m_forward.metric(label='Forward Ratio', value="--")
+    m_lateral.metric(label='Lateral Tilt (deg)', value="--")
+    m_shoulder.metric(label='Shoulder Imbalance (deg)', value="--")
 
 # Clean exit hook: provide a stop button to ensure resources freed explicitly
 if st.button('Stop and release resources'):
