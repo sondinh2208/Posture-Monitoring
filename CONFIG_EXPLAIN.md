@@ -98,22 +98,43 @@ s = vai_phải - vai_trái
 
 ---
 
-## 3. Bộ lọc trung bình động (bộ đệm 10 frame)
+## 3. Bộ lọc trung bình động (10 frame) + EMA (α = 0.3)
+
+### 3a. Trung bình động (Moving Average, bộ đệm 10 frame)
 
 - Ba deque được lưu trong `st.session_state`: `lean_buffer`, `tilt_buffer`, `imbalance_buffer`.
 - Mỗi deque có `maxlen=10` — chỉ giữ 10 giá trị thô gần nhất (giá trị cũ tự động bị loại).
 - Mỗi frame mới, giá trị thô được **thêm vào** (append), sau đó lấy *trung bình cộng* của bộ đệm.
-- Giá trị trung bình đã làm mịn thay thế giá trị thô và dùng cho **UI, hiệu chuẩn và ngưỡng**.
-- Bộ đệm nằm trong `st.session_state` nên không bị mất khi Streamlit rerun.
 
-**Tác dụng:** làm mịn nhiễu thất thường của landmark. Ở 30 fps thêm độ trễ ~0.33 s.
+### 3b. Lọc mũ EMA (Exponential Moving Average, α = 0.3)
+
+- Trạng thái EMA lưu trong `st.session_state.ema_smoother` (lớp `EMASmoother`, giữ
+  `prev_values` — giá trị làm mịn của frame trước cho từng đại lượng).
+- Công thức: `Value_smooth = α * Value_current + (1 - α) * Value_previous`, với `EMA_ALPHA = 0.3`
+  (đáp ứng nhanh nhưng không rung; hạ α xuống để mượt hơn, nâng lên để phản hồi nhanh hơn).
+- **Frame đầu tiên hoặc ngay sau khi nhấn "Calibrate"** (và sau khi Tắt/Bật lại camera):
+  EMA bị reset và gán trực tiếp `Value_smooth = Value_current` (không trộn với dữ liệu cũ).
+- Hai đại lượng góc (`lateral_tilt`, `shoulder_imbalance`) được làm mịn **an toàn khi vắt biên ±180°**:
+  dùng hiệu góc ngắn nhất có dấu thay vì trừ trực tiếp, tránh lỗi khi góc `atan2` vắt qua
+  biên +180/-180 (ví dụ 179° và -179° chỉ cách nhau 2°).
+- Kết quả là 4 giá trị `*_smooth` dùng cho **cả hiển thị lẫn phân loại ngưỡng**:
+  `forward_ratio_smooth`, `lateral_tilt_smooth`, `shoulder_imbalance_smooth`, `posture_score_smooth`.
+
+### 3c. Thứ tự pipeline
+
+`raw metrics` → MA (10 frame) → **EMA (α = 0.3)** → deviations vs baseline → phân loại
+Good/Bad + debounce → score → UI (metric cards, overlay trên video, Posture Score).
+
+**Tác dụng:** MA làm mịn nhiễu thất thường của landmark; EMA khử rung frame-to-frame còn sót lại
+trước khi render. Ở 30 fps, MA thêm độ trễ ~0.33 s, EMA α=0.3 thêm hằng số thời gian ~3 frame (~0.1 s).
 
 ---
 
 ## 4. Hiệu chuẩn (Baseline Calibration)
 
-- Nhấn **"Calibrate"**: lưu các chỉ số đã làm mịn hiện tại thành baseline
-  `{'forward_lean', 'lateral_tilt', 'shoulder_imbalance'}`.
+- Nhấn **"Calibrate"**: reset EMA rồi lưu các chỉ số đã làm mịn (MA + EMA) hiện tại thành baseline
+  `{'forward_lean', 'lateral_tilt', 'shoulder_imbalance'}`. Frame hiệu chuẩn được gán trực tiếp
+  (`Value_smooth = Value_current`) nên baseline không bị "kéo" bởi lịch sử EMA cũ.
 - **Tự động hiệu chuẩn:** nếu chưa có baseline, frame hợp lệ đầu tiên sẽ trở thành baseline
   (ngăn cảnh báo sai ngay từ đầu).
 - Mọi chỉ số sau đó được so sánh theo: `deviation = smoothed_metric - baseline_metric`.
@@ -147,6 +168,8 @@ Với mỗi chỉ số: `metric_score = 100 * (1 - min(1, |deviation| / threshol
 
 - Nếu threshold = `0`, điểm chỉ số đó là `100`.
 - Điểm cuối `score = (s_forward + s_lateral + s_shoulder) / 3`, làm tròn số nguyên.
+- Điểm này được làm mịn tiếp bằng EMA (`posture_score_smooth`) trước khi hiển thị; khi không
+  detect được pose, điểm hiển thị mặc định 100 và **không** đưa vào EMA.
 
 ---
 
@@ -183,6 +206,7 @@ Với mỗi chỉ số: `metric_score = 100 * (1 - min(1, |deviation| / threshol
   },
   "filter": {
     "moving_average_window": 10,
+    "ema_alpha": 0.3,
     "debounce_limit": 8,
     "mode": "consecutive"
   }

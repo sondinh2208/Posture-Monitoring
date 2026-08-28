@@ -34,6 +34,11 @@ def ensure_session_state_keys():
         st.session_state.tilt_buffer = deque(maxlen=10)        # Lateral Tilt (lateral_deg)
     if 'imbalance_buffer' not in st.session_state:
         st.session_state.imbalance_buffer = deque(maxlen=10)   # Shoulder Imbalance (shoulder_deg)
+    # --- EMA (Exponential Moving Average) smoother state ---
+    # Keeps the previous smoothed value per metric so each new frame is blended with it:
+    # Value_smooth = alpha * Value_current + (1 - alpha) * Value_previous
+    if 'ema_smoother' not in st.session_state:
+        st.session_state.ema_smoother = EMASmoother(alpha=EMA_ALPHA)
     # Last-seen state: keeps the last video frame & metrics so the UI can render them
     # after the camera is stopped instead of showing a blank/black screen.
     if 'last_frame' not in st.session_state:
@@ -87,6 +92,10 @@ def stop_camera():
     """
     release_resources()
     st.session_state.camera_running = False
+    # Reset the EMA history so the next camera session starts with a direct assignment
+    # (Value_smooth = Value_current on its first frame) instead of blending with stale values.
+    if st.session_state.get('ema_smoother') is not None:
+        st.session_state.ema_smoother.reset()
 
 
 def open_camera(device_index=0):
@@ -175,6 +184,103 @@ def shortest_angle_diff(current_deg, baseline_deg):
     """
     diff = (current_deg - baseline_deg + 180.0) % 360.0 - 180.0
     return abs(diff)
+
+
+# --------------------- EMA (Exponential Moving Average) Filter ---------------------
+
+# Smoothing factor alpha in (0, 1]:
+#   Value_smooth = alpha * Value_current + (1 - alpha) * Value_previous
+# alpha ~ 0.3 -> responds quickly to real posture changes while suppressing
+# frame-to-frame jitter of the MediaPipe landmarks. Lower = smoother/slower.
+EMA_ALPHA = 0.3
+
+
+def shortest_signed_angle_diff(current_deg, reference_deg):
+    """Signed shortest angular difference (deg), result in [-180, 180).
+
+    Same atan2 wrap-around handling as shortest_angle_diff() but keeps the sign so the
+    EMA can move an angle the short way across the +180/-180 boundary:
+    diff = (current - reference + 180) % 360 - 180.
+    """
+    return (current_deg - reference_deg + 180.0) % 360.0 - 180.0
+
+
+def ema_smooth(current, previous, alpha=EMA_ALPHA):
+    """Plain EMA on a scalar quantity.
+
+    Value_smooth = alpha * Value_current + (1 - alpha) * Value_previous
+    First frame (previous is None): the current value is assigned directly
+    (Value_smooth = Value_current) so the filter starts without a ramp-up lag.
+    """
+    if previous is None:
+        return float(current)
+    return alpha * float(current) + (1.0 - alpha) * float(previous)
+
+
+def ema_smooth_angle(current_deg, previous_deg, alpha=EMA_ALPHA):
+    """Wrap-safe EMA for angle quantities in degrees (atan2 range -180..180).
+
+    Naively blending e.g. current=179 deg with previous=-179 deg would yield ~0 deg;
+    instead we step from the previous angle along the shortest signed difference
+    toward the current one: previous + alpha * shortest_signed_angle_diff(current, previous).
+    """
+    if previous_deg is None:
+        return float(current_deg)
+    return previous_deg + alpha * shortest_signed_angle_diff(current_deg, previous_deg)
+
+
+class EMASmoother:
+    """Per-metric EMA state kept in st.session_state (in-memory, per browser session).
+
+    Stores the previous smoothed value for every filtered quantity:
+      - 'forward_ratio'       -> rendered as forward_ratio_smooth
+      - 'lateral_tilt'        -> rendered as lateral_tilt_smooth
+      - 'shoulder_imbalance'  -> rendered as shoulder_imbalance_smooth
+      - 'posture_score'       -> rendered as posture_score_smooth
+
+    First frame, or the first frame after reset() (Calibrate / camera restart):
+    Value_smooth = Value_current (direct assignment, no blending with stale data).
+    """
+
+    def __init__(self, alpha=EMA_ALPHA):
+        self.alpha = float(alpha)
+        self.prev_values = {}  # metric key -> last smoothed value (missing key = first frame)
+
+    def reset(self):
+        """Forget all EMA history so the next smooth() call assigns the current value directly."""
+        self.prev_values = {}
+
+    def smooth(self, key, value, angular=False):
+        """EMA-blend `value` for `key`, store it as the new previous value and return it."""
+        previous = self.prev_values.get(key)
+        if previous is None:
+            # First frame (or right after Calibrate/reset): direct assignment.
+            smoothed = float(value)
+        elif angular:
+            smoothed = ema_smooth_angle(value, previous, self.alpha)
+        else:
+            smoothed = ema_smooth(value, previous, self.alpha)
+        self.prev_values[key] = smoothed
+        return smoothed
+
+    def smooth_metrics(self, metrics):
+        """Apply EMA to the three posture metrics (after the moving-average filter).
+
+        metrics: dict from compute_posture_metrics_3d / MA filter, or None (no pose).
+        Returns the dict with the *_smooth keys used for rendering, or None untouched.
+        """
+        if metrics is None:
+            return None
+        return {
+            'forward_ratio_smooth': self.smooth('forward_ratio', metrics['forward_lean']),
+            # The two angle metrics are smoothed wrap-safely across the atan2 +/-180 boundary.
+            'lateral_tilt_smooth': self.smooth('lateral_tilt', metrics['lateral_tilt'], angular=True),
+            'shoulder_imbalance_smooth': self.smooth('shoulder_imbalance', metrics['shoulder_imbalance'], angular=True),
+        }
+
+    def smooth_score(self, score):
+        """EMA-blend the 0-100 posture score; returns posture_score_smooth."""
+        return self.smooth('posture_score', score)
 
 
 def draw_text_with_bg(frame, text, org, font, scale, color, thickness, bg_color=(0, 0, 0), bg_alpha=0.5):
@@ -351,23 +457,44 @@ if st.session_state.camera_running:
                 metrics = None
             # ===================== End Moving Average Filter =====================
 
-            # If calibrate button clicked and metrics available, store baseline
+            # ===================== EMA (Exponential Moving Average) Filter =====================
+            # Calibrate pressed: clear the EMA history first so smoothing restarts cleanly and
+            # the calibration frame is assigned directly (Value_smooth = Value_current).
             if calibrate_btn:
-                if metrics is not None:
-                    st.session_state.baseline = metrics.copy()
+                st.session_state.ema_smoother.reset()
+
+            # EMA update: Value_smooth = alpha * Value_current + (1 - alpha) * Value_previous.
+            # First frame (no previous value) -> direct assignment, handled inside EMASmoother.
+            # Produces the *_smooth values used for BOTH rendering and threshold classification.
+            metrics_smooth = st.session_state.ema_smoother.smooth_metrics(metrics)
+
+            # If calibrate button clicked and metrics available, store baseline (smoothed values)
+            if calibrate_btn:
+                if metrics_smooth is not None:
+                    st.session_state.baseline = {
+                        'forward_lean': metrics_smooth['forward_ratio_smooth'],
+                        'lateral_tilt': metrics_smooth['lateral_tilt_smooth'],
+                        'shoulder_imbalance': metrics_smooth['shoulder_imbalance_smooth'],
+                    }
                     st.success('Calibration baseline saved.')
                 else:
                     st.warning('No pose detected for calibration. Please stand straight in front of the camera.')
 
             # If not calibrated yet, auto-calibrate on first good frame to avoid immediate alerts
             deviations = {'forward_lean': 0.0, 'lateral_tilt': 0.0, 'shoulder_imbalance': 0.0}
-            if metrics is not None and st.session_state.baseline['forward_lean'] is not None:
-                deviations['forward_lean'] = metrics['forward_lean'] - st.session_state.baseline['forward_lean']
+            if metrics_smooth is not None and st.session_state.baseline['forward_lean'] is not None:
+                # Deviations are computed from the EMA-smoothed values so both the threshold
+                # classification (Good/Bad posture) and the displayed deltas are jitter-free.
+                deviations['forward_lean'] = metrics_smooth['forward_ratio_smooth'] - st.session_state.baseline['forward_lean']
                 # Angular difference handles atan2 wrap-around near +180/-180 for the two angle metrics.
-                deviations['lateral_tilt'] = shortest_angle_diff(metrics['lateral_tilt'], st.session_state.baseline['lateral_tilt'])
-                deviations['shoulder_imbalance'] = shortest_angle_diff(metrics['shoulder_imbalance'], st.session_state.baseline['shoulder_imbalance'])
-            elif metrics is not None and st.session_state.baseline['forward_lean'] is None:
-                st.session_state.baseline = metrics.copy()
+                deviations['lateral_tilt'] = shortest_angle_diff(metrics_smooth['lateral_tilt_smooth'], st.session_state.baseline['lateral_tilt'])
+                deviations['shoulder_imbalance'] = shortest_angle_diff(metrics_smooth['shoulder_imbalance_smooth'], st.session_state.baseline['shoulder_imbalance'])
+            elif metrics_smooth is not None and st.session_state.baseline['forward_lean'] is None:
+                st.session_state.baseline = {
+                    'forward_lean': metrics_smooth['forward_ratio_smooth'],
+                    'lateral_tilt': metrics_smooth['lateral_tilt_smooth'],
+                    'shoulder_imbalance': metrics_smooth['shoulder_imbalance_smooth'],
+                }
                 deviations = {'forward_lean': 0.0, 'lateral_tilt': 0.0, 'shoulder_imbalance': 0.0}
                 st.info('Auto-calibrated from the current frame.')
 
@@ -415,16 +542,16 @@ if st.session_state.camera_running:
                 mp_drawing.draw_landmarks(frame_drawn, results.pose_landmarks, mp_pose.POSE_CONNECTIONS, landmark_drawing_spec=l_spec, connection_drawing_spec=c_spec)
 
             # Draw vertical nose->shoulder_mid and shoulder line
-            frame_drawn = draw_guides(frame_drawn, pts, metrics)
+            frame_drawn = draw_guides(frame_drawn, pts, metrics_smooth)
 
             # Overlay textual info (metrics and warning) with a semi-transparent background
             y0 = 30
             dy = 25
             font = cv2.FONT_HERSHEY_SIMPLEX
-            if metrics is not None:
-                draw_text_with_bg(frame_drawn, f"Forward Ratio: {metrics['forward_lean']:.3f}", (10, y0), font, 0.7, (0,255,255), 2)
-                draw_text_with_bg(frame_drawn, f"Lateral Tilt: {metrics['lateral_tilt']:.1f} deg", (10, y0+dy), font, 0.7, (0,255,255), 2)
-                draw_text_with_bg(frame_drawn, f"Shoulder Angle: {metrics['shoulder_imbalance']:.1f} deg", (10, y0+2*dy), font, 0.7, (0,255,255), 2)
+            if metrics_smooth is not None:
+                draw_text_with_bg(frame_drawn, f"Forward Ratio: {metrics_smooth['forward_ratio_smooth']:.3f}", (10, y0), font, 0.7, (0,255,255), 2)
+                draw_text_with_bg(frame_drawn, f"Lateral Tilt: {metrics_smooth['lateral_tilt_smooth']:.1f} deg", (10, y0+dy), font, 0.7, (0,255,255), 2)
+                draw_text_with_bg(frame_drawn, f"Shoulder Angle: {metrics_smooth['shoulder_imbalance_smooth']:.1f} deg", (10, y0+2*dy), font, 0.7, (0,255,255), 2)
             else:
                 draw_text_with_bg(frame_drawn, 'No pose detected', (10, y0), font, 0.7, (0,0,255), 2)
 
@@ -432,8 +559,9 @@ if st.session_state.camera_running:
                 draw_text_with_bg(frame_drawn, 'BAD POSTURE!', (int(image_w/4), int(image_h/2)), cv2.FONT_HERSHEY_DUPLEX, 2.0, (0,0,255), 4)
 
             # Compute a simple score 0-100 (higher = better) using thresholds
+            # (computed from the EMA-smoothed deviations, so the score itself is jitter-free)
             score = 100
-            if metrics is not None:
+            if metrics_smooth is not None:
                 def metric_score(dev, thresh, is_normalized=False):
                     if thresh is None or thresh == 0:
                         return 100.0
@@ -447,19 +575,25 @@ if st.session_state.camera_running:
                 s2 = metric_score(deviations['lateral_tilt'], lateral_thresh)
                 s3 = metric_score(deviations['shoulder_imbalance'], shoulder_thresh_new)
                 score = int((s1 + s2 + s3) / 3.0)
+                # EMA-smooth the posture score as well -> posture_score_smooth.
+                # Only fed when a pose is actually measured, so 'no pose' frames do not
+                # drag the average toward the default 100.
+                posture_score_smooth = st.session_state.ema_smoother.smooth_score(score)
+            else:
+                posture_score_smooth = float(score)
 
-            score_text.metric(label='Posture Score (0-100)', value=score)
+            score_text.metric(label='Posture Score (0-100)', value=int(round(posture_score_smooth)))
 
-            # Live metric cards with current value + delta vs baseline
-            if metrics is not None and st.session_state.baseline['forward_lean'] is not None:
-                m_forward.metric(label='Forward Ratio', value=f"{metrics['forward_lean']:.3f}", delta=f"{deviations['forward_lean']:+.3f}")
-                m_lateral.metric(label='Lateral Tilt (deg)', value=f"{metrics['lateral_tilt']:.1f}", delta=f"{deviations['lateral_tilt']:+.1f}")
-                m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{metrics['shoulder_imbalance']:.1f}", delta=f"{deviations['shoulder_imbalance']:+.1f}")
-            elif metrics is not None:
+            # Live metric cards with current (EMA-smoothed) value + delta vs baseline
+            if metrics_smooth is not None and st.session_state.baseline['forward_lean'] is not None:
+                m_forward.metric(label='Forward Ratio', value=f"{metrics_smooth['forward_ratio_smooth']:.3f}", delta=f"{deviations['forward_lean']:+.3f}")
+                m_lateral.metric(label='Lateral Tilt (deg)', value=f"{metrics_smooth['lateral_tilt_smooth']:.1f}", delta=f"{deviations['lateral_tilt']:+.1f}")
+                m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{metrics_smooth['shoulder_imbalance_smooth']:.1f}", delta=f"{deviations['shoulder_imbalance']:+.1f}")
+            elif metrics_smooth is not None:
                 # metrics available but no baseline yet
-                m_forward.metric(label='Forward Ratio', value=f"{metrics['forward_lean']:.3f}", delta="n/a")
-                m_lateral.metric(label='Lateral Tilt (deg)', value=f"{metrics['lateral_tilt']:.1f}", delta="n/a")
-                m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{metrics['shoulder_imbalance']:.1f}", delta="n/a")
+                m_forward.metric(label='Forward Ratio', value=f"{metrics_smooth['forward_ratio_smooth']:.3f}", delta="n/a")
+                m_lateral.metric(label='Lateral Tilt (deg)', value=f"{metrics_smooth['lateral_tilt_smooth']:.1f}", delta="n/a")
+                m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{metrics_smooth['shoulder_imbalance_smooth']:.1f}", delta="n/a")
             else:
                 m_forward.metric(label='Forward Ratio', value="--")
                 m_lateral.metric(label='Lateral Tilt (deg)', value="--")
@@ -478,11 +612,11 @@ if st.session_state.camera_running:
             frame_rgb = cv2.cvtColor(frame_drawn, cv2.COLOR_BGR2RGB)
             frame_placeholder.image(frame_rgb, channels='RGB')
 
-            # Persist the latest frame/metrics/score so the UI can restore them after Stop
+            # Persist the latest frame/SMOOTHED metrics/score so the UI can restore them after Stop
             st.session_state.last_frame = frame_rgb
-            st.session_state.last_metrics = metrics.copy() if metrics is not None else None
+            st.session_state.last_metrics = metrics_smooth.copy() if metrics_smooth is not None else None
             st.session_state.last_deviations = {k: float(v) for k, v in deviations.items()}
-            st.session_state.last_score = score
+            st.session_state.last_score = posture_score_smooth
 
             # tiny sleep (limits the frame rate of the while loop)
             time.sleep(0.02)
@@ -524,19 +658,19 @@ else:
     last_devs = st.session_state.last_deviations
 
     if st.session_state.last_score is not None:
-        score_text.metric(label='Posture Score (0-100)', value=st.session_state.last_score)
+        score_text.metric(label='Posture Score (0-100)', value=int(round(st.session_state.last_score)))
     else:
         score_text.write('Camera is off. Turn on the camera to start monitoring.')
 
     if last_metrics is not None and st.session_state.baseline['forward_lean'] is not None and last_devs is not None:
-        m_forward.metric(label='Forward Ratio', value=f"{last_metrics['forward_lean']:.3f}", delta=f"{last_devs['forward_lean']:+.3f}")
-        m_lateral.metric(label='Lateral Tilt (deg)', value=f"{last_metrics['lateral_tilt']:.1f}", delta=f"{last_devs['lateral_tilt']:+.1f}")
-        m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{last_metrics['shoulder_imbalance']:.1f}", delta=f"{last_devs['shoulder_imbalance']:+.1f}")
+        m_forward.metric(label='Forward Ratio', value=f"{last_metrics['forward_ratio_smooth']:.3f}", delta=f"{last_devs['forward_lean']:+.3f}")
+        m_lateral.metric(label='Lateral Tilt (deg)', value=f"{last_metrics['lateral_tilt_smooth']:.1f}", delta=f"{last_devs['lateral_tilt']:+.1f}")
+        m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{last_metrics['shoulder_imbalance_smooth']:.1f}", delta=f"{last_devs['shoulder_imbalance']:+.1f}")
     elif last_metrics is not None:
         # metrics available but no baseline yet
-        m_forward.metric(label='Forward Ratio', value=f"{last_metrics['forward_lean']:.3f}", delta="n/a")
-        m_lateral.metric(label='Lateral Tilt (deg)', value=f"{last_metrics['lateral_tilt']:.1f}", delta="n/a")
-        m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{last_metrics['shoulder_imbalance']:.1f}", delta="n/a")
+        m_forward.metric(label='Forward Ratio', value=f"{last_metrics['forward_ratio_smooth']:.3f}", delta="n/a")
+        m_lateral.metric(label='Lateral Tilt (deg)', value=f"{last_metrics['lateral_tilt_smooth']:.1f}", delta="n/a")
+        m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{last_metrics['shoulder_imbalance_smooth']:.1f}", delta="n/a")
     else:
         m_forward.metric(label='Forward Ratio', value="--")
         m_lateral.metric(label='Lateral Tilt (deg)', value="--")
