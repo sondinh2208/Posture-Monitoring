@@ -219,6 +219,19 @@ Với mỗi chỉ số: `metric_score = 100 * (1 - min(1, |deviation| / threshol
 
 ---
 
+## 10. Live Trend Chart (Posture Score, 60 giây)
+
+- Biểu đồ đường `st.line_chart` đặt dưới cột **Status** (placeholder `trend_chart`) hiển thị
+  `posture_score_smooth` (đã qua MA + EMA) trong **60 giây gần nhất**.
+- Dữ liệu: `st.session_state.score_history` — deque các mẫu `(timestamp, score)`,
+  `maxlen=600`; hàm `append_score_sample()` tự cắt các mẫu cũ hơn `TREND_WINDOW_SECONDS = 60`.
+- `score_trend_dataframe()` chuyển samples thành DataFrame với **DatetimeIndex** nên trục X là
+  thời gian thực (khoảng dừng camera vẫn hiện rõ trên trục thời gian).
+- Tắt camera biểu đồ vẫn giữ nguyên lịch sử của phiên; chỉ bị xóa khi reload trang (mất session).
+- Cần `pandas` (đã là dependency sẵn có của Streamlit).
+
+---
+
 ### Ghi chú
 
 - Kiểm tra đơn vị trong code: `forward_ratio` không thứ nguyên; `lateral_tilt` và

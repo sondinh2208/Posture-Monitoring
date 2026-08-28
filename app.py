@@ -4,6 +4,7 @@ import time
 from collections import deque
 import cv2
 import numpy as np
+import pandas as pd
 import streamlit as st
 import mediapipe as mp
 
@@ -39,6 +40,9 @@ def ensure_session_state_keys():
     # Value_smooth = alpha * Value_current + (1 - alpha) * Value_previous
     if 'ema_smoother' not in st.session_state:
         st.session_state.ema_smoother = EMASmoother(alpha=EMA_ALPHA)
+    # --- Live trend chart history: (timestamp, posture_score_smooth) samples ---
+    if 'score_history' not in st.session_state:
+        st.session_state.score_history = deque(maxlen=TREND_MAX_SAMPLES)
     # Last-seen state: keeps the last video frame & metrics so the UI can render them
     # after the camera is stopped instead of showing a blank/black screen.
     if 'last_frame' not in st.session_state:
@@ -283,6 +287,39 @@ class EMASmoother:
         return self.smooth('posture_score', score)
 
 
+# --------------------- Live Trend Chart (Posture Score, last 60 s) ---------------------
+
+# Width of the rolling window shown in the live trend chart, in seconds.
+TREND_WINDOW_SECONDS = 60.0
+# Hard cap on stored samples (enough for 60 s even at ~10 samples/s); samples are also
+# pruned by timestamp in append_score_sample() so the window always spans 60 s max.
+TREND_MAX_SAMPLES = 600
+
+
+def append_score_sample(history, score, now=None):
+    """Append a (timestamp, score) sample and prune samples older than the 60 s window."""
+    if now is None:
+        now = time.time()
+    history.append((float(now), float(score)))
+    cutoff = float(now) - TREND_WINDOW_SECONDS
+    while history and history[0][0] < cutoff:
+        history.popleft()
+    return history
+
+
+def score_trend_dataframe(history):
+    """Convert (timestamp, score) samples into a DataFrame for st.line_chart.
+
+    The DatetimeIndex makes the x-axis show real time, so pauses (camera stopped)
+    stay visible and the chart always covers the last 60 seconds of wall-clock time.
+    """
+    if not history:
+        return pd.DataFrame({'Posture Score': []})
+    times = [t for t, _ in history]
+    scores = [s for _, s in history]
+    return pd.DataFrame({'Posture Score': scores}, index=pd.to_datetime(times, unit='s'))
+
+
 def draw_text_with_bg(frame, text, org, font, scale, color, thickness, bg_color=(0, 0, 0), bg_alpha=0.5):
     """Draw text on the frame with a semi-transparent black rectangle behind it for readability.
 
@@ -394,6 +431,10 @@ with col2:
     m_lateral = st.empty()
     m_shoulder = st.empty()
     st.markdown('---')
+    # Live trend chart: Posture Score (0-100) over the last 60 seconds, so the user can
+    # track how stable their sitting posture is at a glance.
+    st.caption('Posture Score trend (last 60 s)')
+    trend_chart = st.empty()
     if st.session_state.alert_active:
         st.error('ALERT: PERSISTENT BAD POSTURE!')
 
@@ -584,6 +625,10 @@ if st.session_state.camera_running:
 
             score_text.metric(label='Posture Score (0-100)', value=int(round(posture_score_smooth)))
 
+            # Record the smoothed score and refresh the live 60 s trend chart
+            append_score_sample(st.session_state.score_history, posture_score_smooth)
+            trend_chart.line_chart(score_trend_dataframe(st.session_state.score_history), height=200)
+
             # Live metric cards with current (EMA-smoothed) value + delta vs baseline
             if metrics_smooth is not None and st.session_state.baseline['forward_lean'] is not None:
                 m_forward.metric(label='Forward Ratio', value=f"{metrics_smooth['forward_ratio_smooth']:.3f}", delta=f"{deviations['forward_lean']:+.3f}")
@@ -675,6 +720,12 @@ else:
         m_forward.metric(label='Forward Ratio', value="--")
         m_lateral.metric(label='Lateral Tilt (deg)', value="--")
         m_shoulder.metric(label='Shoulder Imbalance (deg)', value="--")
+
+    # --- Keep showing the 60 s Posture Score trend chart collected during the session ---
+    if st.session_state.score_history:
+        trend_chart.line_chart(score_trend_dataframe(st.session_state.score_history), height=200)
+    else:
+        trend_chart.caption('Start the camera to collect the score trend.')
 
 # Camera start/stop is handled by the 'Bật Camera' / 'Tắt Camera' sidebar buttons whose
 # on_click callbacks set st.session_state.camera_running and release the webcam hardware.
