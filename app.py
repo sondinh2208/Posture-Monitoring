@@ -11,8 +11,8 @@ import mediapipe as mp
 
 def ensure_session_state_keys():
     """Initialize expected keys in st.session_state with sensible defaults."""
-    if 'camera_on' not in st.session_state:
-        st.session_state.camera_on = False
+    if 'camera_running' not in st.session_state:
+        st.session_state.camera_running = False
     if 'cap' not in st.session_state:
         st.session_state.cap = None
     if 'pose' not in st.session_state:
@@ -34,6 +34,16 @@ def ensure_session_state_keys():
         st.session_state.tilt_buffer = deque(maxlen=10)        # Lateral Tilt (lateral_deg)
     if 'imbalance_buffer' not in st.session_state:
         st.session_state.imbalance_buffer = deque(maxlen=10)   # Shoulder Imbalance (shoulder_deg)
+    # Last-seen state: keeps the last video frame & metrics so the UI can render them
+    # after the camera is stopped instead of showing a blank/black screen.
+    if 'last_frame' not in st.session_state:
+        st.session_state.last_frame = None        # RGB ndarray ready for image(..., channels='RGB')
+    if 'last_metrics' not in st.session_state:
+        st.session_state.last_metrics = None      # smoothed dict metrics (forward_lean/lateral_tilt/shoulder_imbalance)
+    if 'last_deviations' not in st.session_state:
+        st.session_state.last_deviations = None   # deviations dict for delta display
+    if 'last_score' not in st.session_state:
+        st.session_state.last_score = None        # last computed posture score
 
 
 def release_resources():
@@ -56,6 +66,27 @@ def release_resources():
             st.session_state.pose = None
     except Exception:
         pass
+    # Close any OpenCV HighGUI windows to fully terminate the webcam process.
+    try:
+        cv2.destroyAllWindows()
+    except Exception:
+        pass
+
+
+def start_camera():
+    """Callback for the 'Bật Camera' button: turn the camera_running flag on."""
+    st.session_state.camera_running = True
+
+
+def stop_camera():
+    """Callback for the 'Tắt Camera' button: stop streaming and fully release the webcam.
+
+    Runs inside a widget callback (before widgets are re-instantiated) so the flag can be
+    updated safely. release_resources() calls cap.release() + cv2.destroyAllWindows() to
+    close the webcam hardware thoroughly.
+    """
+    release_resources()
+    st.session_state.camera_running = False
 
 
 def open_camera(device_index=0):
@@ -221,7 +252,11 @@ ensure_session_state_keys()
 # Sidebar controls
 with st.sidebar:
     st.header('Control Panel')
-    cam_checkbox = st.checkbox('Open Camera', value=st.session_state.camera_on, key='camera_on')
+    # Start/Stop buttons controlled by on_click callbacks + camera_running flag.
+    # (No checkbox; resources are released explicitly and immediately on Stop.)
+    st.button('Bật Camera', type='primary', on_click=start_camera, disabled=st.session_state.camera_running)
+    st.button('Tắt Camera', on_click=stop_camera, disabled=not st.session_state.camera_running)
+    st.caption('Status: ' + ('Running' if st.session_state.camera_running else 'Stopped'))
 
     st.markdown('---')
     st.subheader('Calibration')
@@ -257,7 +292,7 @@ with col2:
         st.error('ALERT: PERSISTENT BAD POSTURE!')
 
 # Manage camera open/close
-if st.session_state.camera_on:
+if st.session_state.camera_running:
     # Open resources if not already open
     if st.session_state.cap is None:
         st.session_state.cap = open_camera(0)
@@ -270,12 +305,24 @@ if st.session_state.camera_on:
     if not cap or not cap.isOpened():
         frame_placeholder.image(np.zeros((480, 640, 3), dtype=np.uint8))
         st.error('Cannot open camera. Check access permissions.')
+        # Stop the flag so we don't retry the failed camera on every rerun.
+        cap.release()
+        cv2.destroyAllWindows()
+        st.session_state.cap = None
+        st.session_state.camera_running = False
     else:
-        success, frame = cap.read()
-        if not success:
-            release_resources()
-            st.error('Could not read a frame from the camera.')
-        else:
+        # Process a small batch of frames per rerun so the UI (Tắt button) stays responsive.
+        # The loop re-checks st.session_state.camera_running on every iteration and exits
+        # immediately when the flag turns False.
+        FRAMES_PER_RUN = 5
+        frames_done = 0
+        frame_ok = True
+        while st.session_state.camera_running and frames_done < FRAMES_PER_RUN and frame_ok:
+            success, frame = cap.read()
+            if not success:
+                frame_ok = False
+                break
+            frames_done += 1
             frame = cv2.flip(frame, 1)
             image_h, image_w = frame.shape[:2]
 
@@ -431,23 +478,69 @@ if st.session_state.camera_on:
             frame_rgb = cv2.cvtColor(frame_drawn, cv2.COLOR_BGR2RGB)
             frame_placeholder.image(frame_rgb, channels='RGB')
 
-            # tiny sleep
+            # Persist the latest frame/metrics/score so the UI can restore them after Stop
+            st.session_state.last_frame = frame_rgb
+            st.session_state.last_metrics = metrics.copy() if metrics is not None else None
+            st.session_state.last_deviations = {k: float(v) for k, v in deviations.items()}
+            st.session_state.last_score = score
+
+            # tiny sleep (limits the frame rate of the while loop)
             time.sleep(0.02)
 
-            # Trigger a rerun to fetch the next frame while keeping resources open
+        # ---- After the while loop exits ----
+        if not frame_ok:
+            st.session_state.camera_running = False
+            st.error('Could not read a frame from the camera.')
+
+        # ---- cap.release() + cv2.destroyAllWindows() right after the loop ----
+        if not st.session_state.camera_running:
+            cap.release()
+            cv2.destroyAllWindows()
+            st.session_state.cap = None
+            if st.session_state.pose is not None:
+                try:
+                    st.session_state.pose.close()
+                except Exception:
+                    pass
+                st.session_state.pose = None
+
+        # Continue streaming on a new rerun while the flag stays on
+        if st.session_state.camera_running:
             st.rerun()
 
 else:
-    # Camera is off: release resources if allocated
+    # Camera is off: release resources if allocated, then RESTORE the last seen
+    # frame + metrics so the UI does not go blank/black.
     release_resources()
-    frame_placeholder.image(np.zeros((480, 640, 3), dtype=np.uint8))
-    score_text.write('Camera is off. Turn on the camera to start monitoring.')
-    m_forward.metric(label='Forward Ratio', value="--")
-    m_lateral.metric(label='Lateral Tilt (deg)', value="--")
-    m_shoulder.metric(label='Shoulder Imbalance (deg)', value="--")
 
-# Clean exit hook: provide a stop button to ensure resources freed explicitly
-if st.button('Stop and release resources'):
-    release_resources()
-    st.session_state.camera_on = False
-    st.success('Resources released.')
+    # --- Restore the last video frame (or a black placeholder if never started) ---
+    if st.session_state.last_frame is not None:
+        frame_placeholder.image(st.session_state.last_frame, channels='RGB')
+    else:
+        frame_placeholder.image(np.zeros((480, 640, 3), dtype=np.uint8))
+
+    # --- Restore Status: keep the final score/metrics/baseline instead of resetting ---
+    last_metrics = st.session_state.last_metrics
+    last_devs = st.session_state.last_deviations
+
+    if st.session_state.last_score is not None:
+        score_text.metric(label='Posture Score (0-100)', value=st.session_state.last_score)
+    else:
+        score_text.write('Camera is off. Turn on the camera to start monitoring.')
+
+    if last_metrics is not None and st.session_state.baseline['forward_lean'] is not None and last_devs is not None:
+        m_forward.metric(label='Forward Ratio', value=f"{last_metrics['forward_lean']:.3f}", delta=f"{last_devs['forward_lean']:+.3f}")
+        m_lateral.metric(label='Lateral Tilt (deg)', value=f"{last_metrics['lateral_tilt']:.1f}", delta=f"{last_devs['lateral_tilt']:+.1f}")
+        m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{last_metrics['shoulder_imbalance']:.1f}", delta=f"{last_devs['shoulder_imbalance']:+.1f}")
+    elif last_metrics is not None:
+        # metrics available but no baseline yet
+        m_forward.metric(label='Forward Ratio', value=f"{last_metrics['forward_lean']:.3f}", delta="n/a")
+        m_lateral.metric(label='Lateral Tilt (deg)', value=f"{last_metrics['lateral_tilt']:.1f}", delta="n/a")
+        m_shoulder.metric(label='Shoulder Imbalance (deg)', value=f"{last_metrics['shoulder_imbalance']:.1f}", delta="n/a")
+    else:
+        m_forward.metric(label='Forward Ratio', value="--")
+        m_lateral.metric(label='Lateral Tilt (deg)', value="--")
+        m_shoulder.metric(label='Shoulder Imbalance (deg)', value="--")
+
+# Camera start/stop is handled by the 'Bật Camera' / 'Tắt Camera' sidebar buttons whose
+# on_click callbacks set st.session_state.camera_running and release the webcam hardware.
