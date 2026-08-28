@@ -265,7 +265,7 @@ with st.sidebar:
     st.markdown('---')
     # Threshold sliders grouped inside an expander for a cleaner sidebar
     with st.expander('Cài đặt Ngưỡng', expanded=True):
-        forward_thresh = st.slider('Forward Lean (Turtle Neck) Threshold (increase in face/shoulder ratio)', min_value=0.0, max_value=0.5, value=0.05, step=0.01, key='forward_thresh')
+        forward_thresh = st.slider('Forward Lean (Turtle Neck) Threshold (increase in face/shoulder ratio)', min_value=0.0, max_value=0.5, value=0.04, step=0.01, key='forward_thresh')
         lateral_thresh = st.slider('Lateral Tilt (Body Lean) Threshold (deg)', min_value=0.0, max_value=45.0, value=10.0, step=0.5, key='lateral_thresh')
         shoulder_thresh_new = st.slider('Shoulder Imbalance Threshold (deg)', min_value=0.0, max_value=45.0, value=10.0, step=0.5, key='shoulder_thresh')
 
