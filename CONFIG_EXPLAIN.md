@@ -39,8 +39,8 @@ Lateral Tilt, bộ lọc trung bình động và debounce).
 7. **Debounce** — bộ đếm tăng lên ở mỗi frame vi phạm và đặt về 0 nếu không vi phạm.
    Khi bộ đếm đạt giới hạn `debounce_limit`, cờ `alert_active` chuyển thành `True`.
 
-Ứng dụng hiển thị camera trực tiếp, các dòng chú thích (`Forward Ratio`, `Lateral Tilt`,
-`Shoulder Angle`), điểm tư thế và các thông báo cảnh báo/trạng thái.
+Ứng dụng hiển thị camera trực tiếp (kèm landmark/guide line), điểm tư thế, metric cards,
+Live Trend Chart và các thông báo cảnh báo/trạng thái.
 
 ---
 
@@ -74,25 +74,37 @@ không cảnh báo).
 vẫn thẳng hàng trục dọc với ngực nhưng đầu nghiêng sang một bên):
 
 ```
-lateral_deg = degrees( atan2(dy, dx) )
-d = ( right_ref - left_ref )   # Tai Phải - Tai Trái (fallback: Mắt Phải - Mắt Trái)
+theta = degrees( atan2(dy, dx) )          # hướng có dấu, (-180, 180]
+if theta > 90:  theta -= 180              # fold: đường thẳng không có hướng
+if theta < -90: theta += 180
+lateral_deg = | theta |                   # 0..90, ~0° khi đầu thẳng
+d = ( right_ref - left_ref )              # Tai Phải - Tai Trái (fallback: Mắt Phải - Mắt Trái)
 ```
 
-- Dùng tọa độ chuẩn hóa `(nx, ny)`.
-- Khoảng **0°** khi đầu thẳng; dương/âm khi đầu nghiêng sang hai bên.
+- Dùng **tọa độ pixel** (`x, y`) — cùng đơn vị trên cả hai trục nên góc là góc hình học thật
+  (tọa độ chuẩn hóa `nx, ny` sẽ kéo giãn góc theo tỉ lệ khung hình w/h của camera).
+- Helper `line_tilt_deg()` gập (fold) góc về [-90, 90] rồi lấy `abs()` → **[0, 90]**: đường nối
+  tai ngang hoàn toàn cho **~0°**, kể cả khi `dx` đổi dấu (−170° ≡ 10°, 180° ≡ 0°).
 - Phát hiện ngoẹo đầu/cổ ngay cả khi mũi vẫn thẳng đứng trên đường vai.
+
+**Quy tắc chuẩn hóa:** ngồi thẳng chuẩn → giá trị **tiệm cận 0°**; dải thực tế khi ngồi làm việc
+nằm trong **0–45°**, khớp hoàn toàn với thanh trượt `lateral_thresh` (0–45).
 
 **Quyết định cảnh báo:** `|deviation| > lateral_thresh`.
 
 ### 2.3 Shoulder Imbalance (Lệch vai) — Góc đường vai
 
 ```
-shoulder_deg = | degrees(atan2(sdy, sdx)) |
+theta = degrees( atan2(sdy, sdx) )        # hướng có dấu, (-180, 180]
+if theta > 90:  theta -= 180              # fold: đường thẳng không có hướng
+if theta < -90: theta += 180
+shoulder_deg = | theta |                  # 0..90, ~0° khi vai ngang
 s = vai_phải - vai_trái
 ```
 
-- Dùng tọa độ chuẩn hóa; **0°** = hai vai ngang bằng, lớn hơn = một bên cao hơn.
-- `abs()` làm mất dấu, chỉ quan tâm độ lớn.
+- Cùng helper `line_tilt_deg()` với Lateral Tilt; dùng **tọa độ pixel** (`x, y`).
+- **0°** = hai vai ngang bằng (ngồi thẳng chuẩn → tiệm cận 0°); lớn hơn = một bên cao hơn;
+  dải thực tế nằm trong **0–45°**, khớp thanh trượt `shoulder_thresh` (0–45).
 
 **Cảnh báo:** `|deviation| > shoulder_thresh`.
 
@@ -114,9 +126,9 @@ s = vai_phải - vai_trái
   (đáp ứng nhanh nhưng không rung; hạ α xuống để mượt hơn, nâng lên để phản hồi nhanh hơn).
 - **Frame đầu tiên hoặc ngay sau khi nhấn "Calibrate"** (và sau khi Tắt/Bật lại camera):
   EMA bị reset và gán trực tiếp `Value_smooth = Value_current` (không trộn với dữ liệu cũ).
-- Hai đại lượng góc (`lateral_tilt`, `shoulder_imbalance`) được làm mịn **an toàn khi vắt biên ±180°**:
-  dùng hiệu góc ngắn nhất có dấu thay vì trừ trực tiếp, tránh lỗi khi góc `atan2` vắt qua
-  biên +180/-180 (ví dụ 179° và -179° chỉ cách nhau 2°).
+- Hai đại lượng góc (`lateral_tilt`, `shoulder_imbalance`) là **độ lớn chuẩn hóa [0, 90]**
+  (tính bằng `line_tilt_deg()`), không thể vắt biên ±180°; cơ chế EMA theo hiệu góc ngắn nhất
+  có dấu vẫn được giữ làm an toàn (khi giá trị nằm trong [0, 90] nó suy biến thành EMA thường).
 - Kết quả là 4 giá trị `*_smooth` dùng cho **cả hiển thị lẫn phân loại ngưỡng**:
   `forward_ratio_smooth`, `lateral_tilt_smooth`, `shoulder_imbalance_smooth`, `posture_score_smooth`.
 
@@ -141,6 +153,8 @@ trước khi render. Ở 30 fps, MA thêm độ trễ ~0.33 s, EMA α=0.3 thêm 
   (ngăn cảnh báo sai ngay từ đầu).
 - Mọi chỉ số sau đó được so sánh theo: `deviation = smoothed_metric - baseline_metric`.
 - Luôn hiệu chuẩn khi ngồi thẳng, nhìn thẳng, thả lỏng vai trong 3-5 giây.
+- Baseline phụ thuộc công thức metric: nếu công thức tính thay đổi (ví dụ nâng cấp chuẩn hóa
+  góc), cần nhấn **Calibrate** lại (hoặc reload trang để session mới) trước khi tin cảnh báo.
 
 ---
 
@@ -149,8 +163,8 @@ trước khi render. Ở 30 fps, MA thêm độ trễ ~0.33 s, EMA α=0.3 thêm 
 | Thanh trượt | Khóa cấu hình | Dải | Mặc định | Đơn vị / ý nghĩa |
 |---|---|---|---|---|
 | Forward Lean (Cổ rùa) | `forward_thresh` | 0.0 - 0.5 | **0.05** | độ tăng *tỷ lệ mặt/vai* so với baseline |
-| Lateral Tilt (Vẹo người) | `lateral_thresh` | 0 - 45 | **10.0** | thay đổi tuyệt đối góc đầu/tai (độ) |
-| Shoulder Imbalance | `shoulder_thresh` | 0 - 45 | **10.0** | thay đổi tuyệt đối góc vai (độ) |
+| Lateral Tilt (Vẹo người) | `lateral_thresh` | 0 - 45 | **10.0** | thay đổi tuyệt đối góc nghiêng đầu/tai (độ; đã chuẩn hóa ~0° khi thẳng) |
+| Shoulder Imbalance | `shoulder_thresh` | 0 - 45 | **10.0** | thay đổi tuyệt đối góc nghiêng vai (độ; đã chuẩn hóa ~0° khi vai ngang) |
 
 ---
 
@@ -237,7 +251,8 @@ Với mỗi chỉ số: `metric_score = 100 * (1 - min(1, |deviation| / threshol
 ### Ghi chú
 
 - Kiểm tra đơn vị trong code: `forward_ratio` không thứ nguyên; `lateral_tilt` và
-  `shoulder_imbalance` được đo bằng độ.
+  `shoulder_imbalance` là độ lớn góc (độ) trong [0, 90], chuẩn hóa tiệm cận 0° khi ngồi thẳng
+  (tính bằng `line_tilt_deg()` trên tọa độ pixel).
 - MediaPipe `z` không còn được dùng cho forward lean; tỷ lệ phối cảnh 2D tránh tín hiệu
   độ sâu không tin cậy.
 - Lưu metadata hiệu chuẩn (thời gian, fps, camera id) để gỡ lỗi khi cảnh báo sai.

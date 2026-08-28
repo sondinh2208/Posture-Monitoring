@@ -125,6 +125,25 @@ def landmarks_to_dict(landmarks, image_w, image_h):
     return pts
 
 
+def line_tilt_deg(dx, dy):
+    """Absolute tilt of an UNDIRECTED line vs the horizontal axis, in [0, 90] degrees.
+
+    atan2(dy, dx) returns a SIGNED direction in (-180, 180]; a line, however, has no
+    direction, so any angle beyond +/-90 deg folds back onto its equivalent inclination
+    (e.g. 180 deg == 0 deg, -170 deg == 10 deg). The result is ~0 deg for a level line and
+    grows as the line tilts, so a normalized straight posture reads ~0 deg and typical
+    seated-posture values fall in the 0-45 deg range of the threshold sliders.
+    Pass SAME-UNIT deltas (pixel coords) so the angle is the true geometric angle
+    regardless of the camera aspect ratio.
+    """
+    theta = math.degrees(math.atan2(dy, dx))
+    if theta > 90.0:
+        theta -= 180.0
+    elif theta < -90.0:
+        theta += 180.0
+    return abs(theta)
+
+
 def compute_posture_metrics_3d(pts):
     """Compute the three required metrics.
     Returns dict: {'forward_lean': float, 'lateral_tilt': float, 'shoulder_imbalance': float}
@@ -136,11 +155,17 @@ def compute_posture_metrics_3d(pts):
       distance between LEFT_SHOULDER and RIGHT_SHOULDER. Using pixel coords (x, y).
       When the head moves forward toward the camera, the face appears larger, so the
       ratio increases and the forward-lean error can be detected.
-    - lateral_tilt (face rotation, deg): angle of the line connecting LEFT_EAR and RIGHT_EAR
-      relative to the horizontal axis, angle = atan2(dy, dx). ~0 deg when head is straight,
-      increases in magnitude as the head tilts sideways (even if the nose stays on the
-      vertical spine axis). Falls back to LEFT_EYE/RIGHT_EYE if ears are occluded/missing.
-    - shoulder_imbalance (degrees): angle of shoulder line vs horizontal in degrees (0 = shoulder level).
+    - lateral_tilt (face rotation, deg): ABSOLUTE inclination of the line connecting
+      LEFT_EAR and RIGHT_EAR vs the horizontal axis (undirected line folded into [0, 90]).
+      ~0 deg when the head is straight/upright and grows as the head tilts sideways (even if
+      the nose stays on the vertical spine axis). Falls back to LEFT_EYE/RIGHT_EYE if ears
+      are occluded/missing. Computed in pixel coords so the angle is the true geometric angle.
+    - shoulder_imbalance (degrees): ABSOLUTE inclination of the shoulder line vs the
+      horizontal axis (undirected line folded into [0, 90]). 0 deg = shoulders level;
+      larger = one shoulder higher than the other. Computed in pixel coords.
+
+    Normalization: both angle metrics read ~0 deg for a straight posture and typical
+    bad-posture values fall inside the 0-45 deg range of the threshold sliders.
     """
     try:
         left_sh = pts['LEFT_SHOULDER']
@@ -159,19 +184,19 @@ def compute_posture_metrics_3d(pts):
     shoulder_width = math.hypot(right_sh['x'] - left_sh['x'], right_sh['y'] - left_sh['y'])
     forward_ratio = face_width / shoulder_width if shoulder_width > 0 else 0.0
 
-    # 2) Lateral tilt: head/face rotation angle based on the ear/eye line (normalized coords).
-    dx = right_ref['nx'] - left_ref['nx']
-    dy = right_ref['ny'] - left_ref['ny']
-    # Angle of the ear line relative to the horizontal axis; ~0 deg when the head is straight,
-    # positive/negative as the head tilts sideways (independent of nose position).
-    lateral_rad = math.atan2(dy, dx)
-    lateral_deg = math.degrees(lateral_rad)
+    # 2) Lateral tilt: ABSOLUTE inclination of the ear/eye line vs horizontal, normalized so
+    # a straight head reads ~0 deg (0..90 range; typical seated postures stay within 0..45,
+    # matching the threshold sliders). Pixel coords keep the angle geometrically true —
+    # normalized coords would stretch the angle by the camera aspect ratio (w/h).
+    dx = right_ref['x'] - left_ref['x']
+    dy = right_ref['y'] - left_ref['y']
+    lateral_deg = line_tilt_deg(dx, dy)
 
-    # 3) Shoulder imbalance: shoulder line angle relative to horizontal (normalized coords).
-    sdx = right_sh['nx'] - left_sh['nx']
-    sdy = right_sh['ny'] - left_sh['ny']
-    shoulder_rad = math.atan2(sdy, sdx)
-    shoulder_deg = abs(math.degrees(shoulder_rad))  # 0 = horizontal, larger = more tilted
+    # 3) Shoulder imbalance: ABSOLUTE inclination of the shoulder line vs horizontal,
+    # normalized the same way (0 deg = level shoulders; 0..90 range). Pixel coords.
+    sdx = right_sh['x'] - left_sh['x']
+    sdy = right_sh['y'] - left_sh['y']
+    shoulder_deg = line_tilt_deg(sdx, sdy)
 
     return {'forward_lean': forward_ratio, 'lateral_tilt': lateral_deg, 'shoulder_imbalance': shoulder_deg}
 
@@ -277,7 +302,8 @@ class EMASmoother:
             return None
         return {
             'forward_ratio_smooth': self.smooth('forward_ratio', metrics['forward_lean']),
-            # The two angle metrics are smoothed wrap-safely across the atan2 +/-180 boundary.
+            # Angle metrics are magnitudes in [0, 90] (no wrap possible); the angular EMA
+            # reduces to the plain EMA and is kept purely as a safety net.
             'lateral_tilt_smooth': self.smooth('lateral_tilt', metrics['lateral_tilt'], angular=True),
             'shoulder_imbalance_smooth': self.smooth('shoulder_imbalance', metrics['shoulder_imbalance'], angular=True),
         }
@@ -527,7 +553,8 @@ if st.session_state.camera_running:
                 # Deviations are computed from the EMA-smoothed values so both the threshold
                 # classification (Good/Bad posture) and the displayed deltas are jitter-free.
                 deviations['forward_lean'] = metrics_smooth['forward_ratio_smooth'] - st.session_state.baseline['forward_lean']
-                # Angular difference handles atan2 wrap-around near +180/-180 for the two angle metrics.
+                # Angle metrics are non-negative [0, 90] magnitudes, so this angular difference
+                # equals a plain difference; kept for robustness anyway.
                 deviations['lateral_tilt'] = shortest_angle_diff(metrics_smooth['lateral_tilt_smooth'], st.session_state.baseline['lateral_tilt'])
                 deviations['shoulder_imbalance'] = shortest_angle_diff(metrics_smooth['shoulder_imbalance_smooth'], st.session_state.baseline['shoulder_imbalance'])
             elif metrics_smooth is not None and st.session_state.baseline['forward_lean'] is None:
