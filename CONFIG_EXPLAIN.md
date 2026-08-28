@@ -123,7 +123,9 @@ s = vai_phải - vai_trái
 ### 3c. Thứ tự pipeline
 
 `raw metrics` → MA (10 frame) → **EMA (α = 0.3)** → deviations vs baseline → phân loại
-Good/Bad + debounce → score → UI (metric cards, overlay trên video, Posture Score).
+Good/Bad + debounce → score → UI (metric cards, Posture Score, Live Trend Chart).
+Trên khung video chỉ còn vẽ landmark/guide line, gợi ý đỏ 'No pose detected' khi mất pose và
+cảnh báo lớn 'BAD POSTURE!' khi alert — các nhãn số liệu vàng đã bị bỏ vì trùng cột Status.
 
 **Tác dụng:** MA làm mịn nhiễu thất thường của landmark; EMA khử rung frame-to-frame còn sót lại
 trước khi render. Ở 30 fps, MA thêm độ trễ ~0.33 s, EMA α=0.3 thêm hằng số thời gian ~3 frame (~0.1 s).

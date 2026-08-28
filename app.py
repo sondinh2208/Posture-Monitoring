@@ -83,12 +83,12 @@ def release_resources():
 
 
 def start_camera():
-    """Callback for the 'Bật Camera' button: turn the camera_running flag on."""
+    """Callback for the 'Start Camera' button: turn the camera_running flag on."""
     st.session_state.camera_running = True
 
 
 def stop_camera():
-    """Callback for the 'Tắt Camera' button: stop streaming and fully release the webcam.
+    """Callback for the 'Stop Camera' button: stop streaming and fully release the webcam.
 
     Runs inside a widget callback (before widgets are re-instantiated) so the flag can be
     updated safely. release_resources() calls cap.release() + cv2.destroyAllWindows() to
@@ -397,8 +397,8 @@ with st.sidebar:
     st.header('Control Panel')
     # Start/Stop buttons controlled by on_click callbacks + camera_running flag.
     # (No checkbox; resources are released explicitly and immediately on Stop.)
-    st.button('Bật Camera', type='primary', on_click=start_camera, disabled=st.session_state.camera_running)
-    st.button('Tắt Camera', on_click=stop_camera, disabled=not st.session_state.camera_running)
+    st.button('Start Camera', type='primary', on_click=start_camera, disabled=st.session_state.camera_running)
+    st.button('Stop Camera', on_click=stop_camera, disabled=not st.session_state.camera_running)
     st.caption('Status: ' + ('Running' if st.session_state.camera_running else 'Stopped'))
 
     st.markdown('---')
@@ -407,7 +407,7 @@ with st.sidebar:
 
     st.markdown('---')
     # Threshold sliders grouped inside an expander for a cleaner sidebar
-    with st.expander('Cài đặt Ngưỡng', expanded=True):
+    with st.expander('Threshold Settings', expanded=True):
         forward_thresh = st.slider('Forward Lean (Turtle Neck) Threshold (increase in face/shoulder ratio)', min_value=0.0, max_value=0.5, value=0.04, step=0.01, key='forward_thresh')
         lateral_thresh = st.slider('Lateral Tilt (Body Lean) Threshold (deg)', min_value=0.0, max_value=45.0, value=10.0, step=0.5, key='lateral_thresh')
         shoulder_thresh_new = st.slider('Shoulder Imbalance Threshold (deg)', min_value=0.0, max_value=45.0, value=10.0, step=0.5, key='shoulder_thresh')
@@ -458,7 +458,7 @@ if st.session_state.camera_running:
         st.session_state.cap = None
         st.session_state.camera_running = False
     else:
-        # Process a small batch of frames per rerun so the UI (Tắt button) stays responsive.
+        # Process a small batch of frames per rerun so the UI (Stop button) stays responsive.
         # The loop re-checks st.session_state.camera_running on every iteration and exits
         # immediately when the flag turns False.
         FRAMES_PER_RUN = 5
@@ -585,16 +585,11 @@ if st.session_state.camera_running:
             # Draw vertical nose->shoulder_mid and shoulder line
             frame_drawn = draw_guides(frame_drawn, pts, metrics_smooth)
 
-            # Overlay textual info (metrics and warning) with a semi-transparent background
-            y0 = 30
-            dy = 25
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            if metrics_smooth is not None:
-                draw_text_with_bg(frame_drawn, f"Forward Ratio: {metrics_smooth['forward_ratio_smooth']:.3f}", (10, y0), font, 0.7, (0,255,255), 2)
-                draw_text_with_bg(frame_drawn, f"Lateral Tilt: {metrics_smooth['lateral_tilt_smooth']:.1f} deg", (10, y0+dy), font, 0.7, (0,255,255), 2)
-                draw_text_with_bg(frame_drawn, f"Shoulder Angle: {metrics_smooth['shoulder_imbalance_smooth']:.1f} deg", (10, y0+2*dy), font, 0.7, (0,255,255), 2)
-            else:
-                draw_text_with_bg(frame_drawn, 'No pose detected', (10, y0), font, 0.7, (0,0,255), 2)
+            # Video overlay: only the red 'No pose detected' hint is drawn here. The yellow
+            # metric labels (Forward Ratio / Lateral Tilt / Shoulder Angle) were removed to
+            # keep the video clean — the live values are shown in the Status column instead.
+            if metrics_smooth is None:
+                draw_text_with_bg(frame_drawn, 'No pose detected', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
 
             if st.session_state.alert_active:
                 draw_text_with_bg(frame_drawn, 'BAD POSTURE!', (int(image_w/4), int(image_h/2)), cv2.FONT_HERSHEY_DUPLEX, 2.0, (0,0,255), 4)
@@ -727,5 +722,5 @@ else:
     else:
         trend_chart.caption('Start the camera to collect the score trend.')
 
-# Camera start/stop is handled by the 'Bật Camera' / 'Tắt Camera' sidebar buttons whose
+# Camera start/stop is handled by the 'Start Camera' / 'Stop Camera' sidebar buttons whose
 # on_click callbacks set st.session_state.camera_running and release the webcam hardware.
