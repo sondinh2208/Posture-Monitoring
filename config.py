@@ -15,8 +15,8 @@ Quy ước:
 # Camera
 # =====================================================================
 CAMERA_DEVICE_INDEX = 0      # Index camera mặc định (dùng cv2.VideoCapture)
-CAMERA_FRAME_WIDTH = 640     # Độ rộng khung hình mong muốn (CAP_PROP_FRAME_WIDTH)
-CAMERA_FRAME_HEIGHT = 480    # Độ cao khung hình mong muốn (CAP_PROP_FRAME_HEIGHT)
+CAMERA_FRAME_WIDTH = 800     # Độ rộng khung hình mong muốn (CAP_PROP_FRAME_WIDTH)
+CAMERA_FRAME_HEIGHT = 600    # Độ cao khung hình mong muốn (CAP_PROP_FRAME_HEIGHT)
 CAMERA_FLIP_CODE = 1         # Tham số cv2.flip(frame, 1) -> ảnh selfie không bị lật ngược
 
 # =====================================================================
@@ -79,7 +79,7 @@ SHOULDER_THRESH_STEP = 0.5
 # =====================================================================
 # Debounce (số khung hình liên tiếp vượt ngưỡng trước khi cảnh báo)
 # =====================================================================
-DEBOUNCE_DEFAULT_FRAMES = 8  # Giá trị mặc định của st.session_state.debounce_limit
+DEBOUNCE_DEFAULT_FRAMES = 15  # Giá trị mặc định của st.session_state.debounce_limit
 DEBOUNCE_MIN_FRAMES = 1
 DEBOUNCE_MAX_FRAMES = 300
 DEBOUNCE_STEP = 1
