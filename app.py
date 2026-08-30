@@ -10,8 +10,22 @@ Sau khi tái cấu trúc:
   - File này chỉ còn: UI (Streamlit), vòng lặp camera, vẽ overlay.
 """
 
+import os
 import time
+import warnings
 from collections import deque
+
+# ------------------------------------------------------------------
+# Tắt các cảnh báo / log hệ thống không cần thiết.
+# BẮT BUỘC đặt TRƯỚC khi import mediapipe (mediapipe kéo theo tensorflow).
+# ------------------------------------------------------------------
+warnings.filterwarnings("ignore", category=UserWarning)
+# Chặn cảnh báo: 'SymbolDatabase.GetPrototype() is deprecated'
+# (phát ra từ mediapipe/tensorflow mỗi lần tạo model pose).
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+# Giảm log TensorFlow xuống mức tối thiểu:
+# 0 = tất cả, 1 = info, 2 = warning+error, 3 = chỉ error.
+# ------------------------------------------------------------------
 
 import cv2
 import mediapipe as mp
@@ -93,6 +107,9 @@ def ensure_session_state_keys():
         st.session_state.debounce_limit = DEBOUNCE_DEFAULT_FRAMES
     if 'alert_active' not in st.session_state:
         st.session_state.alert_active = False
+    # --- Trạng thái tư thế gần nhất đã in ra Terminal (chống in lặp) ---
+    if 'last_logged_posture' not in st.session_state:
+        st.session_state.last_logged_posture = None
     # --- Moving Average filter buffers ---
     if 'lean_buffer' not in st.session_state:
         st.session_state.lean_buffer = deque(maxlen=MA_WINDOW_SIZE)
@@ -177,6 +194,26 @@ def landmarks_to_dict(landmarks, image_w, image_h):
         py = int(ny * image_h)
         pts[lm_enum.name] = {'nx': nx, 'ny': ny, 'nz': nz, 'x': px, 'y': py}
     return pts
+
+
+# --------------------- Terminal status logging (ANSI colors, in khi state đổi) ---------------------
+
+TERMINAL_ANSI_GREEN = '\033[92m'   # Xanh lá: tư thế Tốt
+TERMINAL_ANSI_RED = '\033[91m'     # Đỏ: tư thế Xấu / Cảnh báo
+TERMINAL_ANSI_RESET = '\033[0m'    # Reset về màu mặc định
+POSTURE_LOG_PREFIX = '[POSTURE MONITOR]'
+
+
+def log_posture_status_good(score):
+    """In trạng thái TƯ THẾ TỐT ra Terminal màu xanh lá."""
+    print(f"{TERMINAL_ANSI_GREEN}{POSTURE_LOG_PREFIX} \u2705 Good Posture (Score: {score})"
+          f"{TERMINAL_ANSI_RESET}")
+
+
+def log_posture_status_bad(score):
+    """In trạng thái TƯ THẾ XẤU / CẢNH BÁO ra Terminal màu đỏ."""
+    print(f"{TERMINAL_ANSI_RED}{POSTURE_LOG_PREFIX} \u274c Bad Posture Detected! (Score: {score})"
+          f"{TERMINAL_ANSI_RESET}")
 
 
 # --------------------- Live Trend Chart (Posture Score, last 60 s) ---------------------
@@ -539,6 +576,19 @@ if st.session_state.camera_running:
                     f"Bad posture detected (counting: {st.session_state.debounce_counter})")
             else:
                 warning_text.success('Good Posture')
+
+            # ---------------- Terminal status log (chỉ in khi trạng thái Good/Bad ĐỔI) ----------------
+            # Ghi log ra Terminal chỉ khi phát hiện tư thế và trạng thái thay đổi,
+            # tránh in lặp liên tục gây tràn màn hình Terminal.
+            if metrics_smooth is not None:
+                current_posture = 'BAD' if st.session_state.alert_active else 'GOOD'
+                if current_posture != st.session_state.last_logged_posture:
+                    terminal_score = int(round(posture_score_smooth))
+                    if current_posture == 'BAD':
+                        log_posture_status_bad(terminal_score)
+                    else:
+                        log_posture_status_good(terminal_score)
+                    st.session_state.last_logged_posture = current_posture
 
             # Hiển thị frame (BGR -> RGB cho Streamlit).
             frame_rgb = cv2.cvtColor(frame_drawn, cv2.COLOR_BGR2RGB)
