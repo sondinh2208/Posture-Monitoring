@@ -745,47 +745,48 @@ def render_monitor_tab(controls):
 
 
 def render_dashboard_tab():
-    """Tab 2: Analytics Dashboard — thống kê dữ liệu tư thế lịch sử từ SQLite.
+    """Tab 2: Analytics Dashboard - historical posture statistics from SQLite.
 
-    Gồm 3 biểu đồ plotly.express: Pie (tỷ lệ Good/Bad), Bar (số lần vi phạm theo
-    loại lỗi), Line (biến thiên Posture Score theo thời gian) + nút Clear Data.
+    Contains 3 plotly.express charts: Pie (Good/Bad share), Bar (violations by
+    error type), Line (Posture Score over time) plus a Clear Data button.
     """
     st.subheader('📊 Analytics Dashboard')
-    st.caption('Dữ liệu lịch sử được thu thập từ Real-time Monitor (mỗi 2 giây / mỗi trạng thái chuyển đổi).')
+    st.caption('Historical posture data collected by the Real-time Monitor '
+               '(saved every 3 seconds / on status change).')
 
     df = get_session_data()
 
     if df.empty:
-        st.info('Chưa có dữ liệu tư thế. Hãy chạy Real-time Monitor một lúc để hệ thống thu thập dữ liệu.')
+        st.info('No posture data yet. Run the Real-time Monitor for a while to collect data.')
         return
 
-    # ---- Tóm tắt nhanh ----
+    # ---- Quick summary ----
     total = len(df)
     good_count = int((df['status'] == 'Good').sum())
     bad_count = total - good_count
     avg_score = float(df['score'].mean())
     col_sum1, col_sum2, col_sum3, col_sum4 = st.columns(4)
-    col_sum1.metric('Tổng số log', f'{total}')
+    col_sum1.metric('Total log entries', f'{total}')
     col_sum2.metric('Good Posture', f'{good_count} ({good_count / total * 100:.0f}%)')
     col_sum3.metric('Bad Posture', f'{bad_count} ({bad_count / total * 100:.0f}%)')
-    col_sum4.metric('Score trung bình', f'{avg_score:.1f}')
+    col_sum4.metric('Average Score', f'{avg_score:.1f}')
     st.markdown('---')
 
-    # ---- 1) Pie Chart: tỷ lệ thời gian ngồi đúng/sai ----
+    # ---- 1) Pie Chart: good vs bad time share ----
     pie_df = df['status'].value_counts().rename_axis('status').reset_index(name='count')
     fig_pie = px.pie(
         pie_df,
         names='status',
         values='count',
-        title='⏱️ Tỷ lệ thời gian tư thế đúng/sai',
+        title='⏱️ Good vs Bad Posture Time Share',
         color='status',
         color_discrete_map={'Good': '#2ecc71', 'Bad': '#e74c3c'},
         hole=0.4,
     )
     fig_pie.update_traces(textinfo='percent+label')
-    fig_pie.update_layout(legend_title_text='Tư thế')
+    fig_pie.update_layout(legend_title_text='Posture')
 
-    # ---- 2) Bar Chart: số lần vi phạm theo loại lỗi ----
+    # ---- 2) Bar Chart: violations by error type ----
     bad_df = df[df['status'] == 'Bad']
     fig_bar = None
     if not bad_df.empty:
@@ -800,20 +801,20 @@ def render_dashboard_tab():
             x='error_type',
             y='count',
             color='error_type',
-            title='🔍 Số lần vi phạm theo loại lỗi',
-            labels={'error_type': 'Loại lỗi', 'count': 'Số lần vi phạm'},
+            title='🔍 Violations by Error Type',
+            labels={'error_type': 'Error Type', 'count': 'Violation Count'},
         )
         fig_bar.update_layout(showlegend=False)
 
-    # ---- 3) Line Chart: Posture Score theo thời gian ----
+    # ---- 3) Line Chart: Posture Score over time ----
     line_df = df.sort_values('timestamp')
     fig_line = px.line(
         line_df,
         x='timestamp',
         y='score',
         markers=True,
-        title='📈 Biến thiên Posture Score theo thời gian',
-        labels={'timestamp': 'Thời gian', 'score': 'Posture Score'},
+        title='📈 Posture Score over time',
+        labels={'timestamp': 'Time', 'score': 'Posture Score'},
     )
     fig_line.update_traces(line_color='#3498db')
     fig_line.update_layout(yaxis_range=[0, 100])
@@ -825,11 +826,11 @@ def render_dashboard_tab():
         if fig_bar is not None:
             st.plotly_chart(fig_bar, use_container_width=True)
         else:
-            st.info('Chưa có lần vi phạm nào để thống kê.')
+            st.info('No violations recorded yet.')
     with chart_right:
         st.plotly_chart(fig_line, use_container_width=True)
-        # Nội dung phụ: bảng log gần nhất để người dùng theo dõi chi tiết.
-        st.markdown('**🧾 Log gần nhất (5 dòng)**')
+        # Auxiliary content: latest log table for detailed view.
+        st.markdown('**🧾 Latest Logs (last 5 entries)**')
         st.dataframe(df.tail(5)[['timestamp', 'status', 'score', 'error_type']],
                      use_container_width=True)
 
@@ -837,7 +838,7 @@ def render_dashboard_tab():
     st.markdown('---')
     if st.button('🗑️ Clear Data', type='secondary'):
         clear_all_data()
-        # Reset throttle để phiên giám sát mới ghi lại từ đầu.
+        # Reset throttle so a new monitoring session logs from scratch.
         st.session_state.last_log_time = 0.0
         st.session_state.last_log_status = None
         st.rerun()

@@ -116,7 +116,7 @@ ALERT_FONT_THICKNESS = 4
 # Database (SQLite) & Logging throttle
 # =====================================================================
 DATABASE_PATH = 'posture_logs.db'   # File SQLite lưu lịch sử tư thế
-LOG_SAVE_INTERVAL_SECONDS = 2.0     # Throttle: ghi DB tối đa 1 lần / 2 giây
+LOG_SAVE_INTERVAL_SECONDS = 3.0     # Throttle: ghi DB tối đa 1 lần / 3 giây
 
 # =====================================================================
 # Giao diện Streamlit
