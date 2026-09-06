@@ -73,7 +73,7 @@ LATERAL_THRESH_STEP = 0.5
 # =====================================================================
 SHOULDER_THRESH_MIN = 0.0
 SHOULDER_THRESH_MAX = 45.0
-SHOULDER_THRESH_DEFAULT = 10.0
+SHOULDER_THRESH_DEFAULT = 8.0
 SHOULDER_THRESH_STEP = 0.5
 
 # =====================================================================
@@ -111,6 +111,12 @@ WARN_FONT_SCALE = 0.7      # Thông báo 'No pose detected'
 WARN_FONT_THICKNESS = 2
 ALERT_FONT_SCALE = 2.0     # Thông báo 'BAD POSTURE!'
 ALERT_FONT_THICKNESS = 4
+
+# =====================================================================
+# Database (SQLite) & Logging throttle
+# =====================================================================
+DATABASE_PATH = 'posture_logs.db'   # File SQLite lưu lịch sử tư thế
+LOG_SAVE_INTERVAL_SECONDS = 2.0     # Throttle: ghi DB tối đa 1 lần / 2 giây
 
 # =====================================================================
 # Giao diện Streamlit
